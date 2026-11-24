@@ -2,6 +2,8 @@
 K2 engine model (.model) and animation clip (.clip) exporter for Blender.
 Writes SMDL v3 meshes and CLIP v2 animations.
 Ported from the original S2 Games 3ds Max exporter (s2exporter.cpp).
+
+Tested with Blender 4.x and 5.x
 """
 
 import bpy
@@ -13,15 +15,72 @@ import os
 from math import degrees
 from mathutils import Matrix
 
-from .k2_common import (
-    log, vlog, dlog, err,
-    bone_depth,
-    MKEY_X, MKEY_Y, MKEY_Z,
-    MKEY_PITCH, MKEY_ROLL, MKEY_YAW,
-    MKEY_VISIBILITY,
-    MKEY_SCALE_X, MKEY_SCALE_Y, MKEY_SCALE_Z,
-    MKEY_COUNT,
-)
+try:
+    from .k2_common import (
+        log, vlog, dlog, err,
+        bone_depth,
+        MKEY_X, MKEY_Y, MKEY_Z,
+        MKEY_PITCH, MKEY_ROLL, MKEY_YAW,
+        MKEY_VISIBILITY,
+        MKEY_SCALE_X, MKEY_SCALE_Y, MKEY_SCALE_Z,
+        MKEY_COUNT,
+    )
+except ImportError:
+    from k2_common import (
+        log, vlog, dlog, err,
+        bone_depth,
+        MKEY_X, MKEY_Y, MKEY_Z,
+        MKEY_PITCH, MKEY_ROLL, MKEY_YAW,
+        MKEY_VISIBILITY,
+        MKEY_SCALE_X, MKEY_SCALE_Y, MKEY_SCALE_Z,
+        MKEY_COUNT,
+    )
+
+# Blender version compatibility helpers
+try:
+    from .k2_compat import (
+        bmesh_faces, bmesh_ensure_lookup, bmesh_color_layer, bmesh_deform_layer,
+        read_deform_weights,
+        mesh_polygons, mesh_vertices, mesh_uv_layers, mesh_color_layers,
+        get_uv_layer_values, set_uv_layer_value,
+        material_uses_nodes,
+        BLENDER_VERSION, BLENDER_4_PLUS, BLENDER_5_PLUS,
+    )
+except ImportError:
+    from k2_compat import (
+        bmesh_faces, bmesh_ensure_lookup, bmesh_color_layer, bmesh_deform_layer,
+        read_deform_weights,
+        mesh_polygons, mesh_vertices, mesh_uv_layers, mesh_color_layers,
+        get_uv_layer_values, set_uv_layer_value,
+        material_uses_nodes,
+        BLENDER_VERSION, BLENDER_4_PLUS, BLENDER_5_PLUS,
+    )
+
+# ============================================================================
+# Blender version detection
+# ============================================================================
+# BLENDER_VERSION / BLENDER_4_PLUS / BLENDER_5_PLUS come from k2_compat.
+
+def _get_bmesh_verts(bm):
+    """Get vertices from bmesh - compatible with Blender 4.x+"""
+    return bm.verts if hasattr(bm, 'verts') else bm.verts
+
+def _get_bmesh_faces(bm):
+    """
+    Get faces from bmesh.
+
+    Blender 4.x briefly exposed ``bm.polygons`` as an alias, but it was
+    removed again in Blender 5.x — ``bm.faces`` is the only portable name.
+    """
+    return bmesh_faces(bm)
+
+def _get_mesh_vertices(mesh):
+    """Get mesh vertices - Blender 4.0+ uses 'vertices' instead of 'verts'"""
+    return mesh.vertices if hasattr(mesh, 'vertices') else mesh.verts
+
+def _get_mesh_polygons(mesh):
+    """Get mesh polygons - Blender 4.0+ uses 'polygons' instead of 'faces'"""
+    return mesh.polygons if hasattr(mesh, 'polygons') else mesh.faces
 
 # ============================================================================
 # Export settings container (mirrors K2ExportSettings PropertyGroup)
@@ -82,13 +141,26 @@ def write_block(file, name, data):
 # Bounding box
 # ============================================================================
 
-def generate_bbox(meshes):
+def generate_bbox(mesh_objs):
+    """Generate bounding box from mesh objects (supports Blender 4.x+ API)"""
     xx, yy, zz = [], [], []
-    for mesh in meshes:
-        for v in mesh.verts:
-            xx.append(v.co[0])
-            yy.append(v.co[1])
-            zz.append(v.co[2])
+    for mesh_obj in mesh_objs:
+        # mesh_obj can be either a bmesh or a Mesh data block
+        verts = None
+        if hasattr(mesh_obj, 'verts'):
+            verts = mesh_obj.verts
+        elif hasattr(mesh_obj, 'vertices'):
+            verts = mesh_obj.vertices
+        elif hasattr(mesh_obj, '__iter__'):
+            # It's a list of vertices
+            verts = mesh_obj
+            
+        if verts:
+            for v in verts:
+                co = v.co if hasattr(v, 'co') else v
+                xx.append(co[0])
+                yy.append(co[1])
+                zz.append(co[2])
     if not xx:
         return [0, 0, 0, 0, 0, 0]
     return [min(xx), min(yy), min(zz), max(xx), max(yy), max(zz)]
@@ -162,7 +234,18 @@ def create_colr_data(colr, meshindex):
     buf = BytesIO()
     buf.write(struct.pack("<i", meshindex))
     for c in colr:
-        buf.write(struct.pack("<4B", c.r, c.g, c.b, c.a))
+        # Colours may be plain RGBA tuples/vectors (Blender 5.x bmesh colour
+        # layers) or objects exposing .r/.g/.b/.a.
+        if hasattr(c, 'r'):
+            r, g, b, a = c.r, c.g, c.b, c.a
+        else:
+            r, g, b = c[0], c[1], c[2]
+            a = c[3] if len(c) > 3 else 1.0
+        buf.write(struct.pack("<4B",
+                              int(max(0.0, min(1.0, r)) * 255),
+                              int(max(0.0, min(1.0, g)) * 255),
+                              int(max(0.0, min(1.0, b)) * 255),
+                              int(max(0.0, min(1.0, a)) * 255)))
     return buf.getvalue()
 
 
@@ -233,7 +316,7 @@ def face_to_vertices(faces, fdata, verts):
             continue
         face_data = fdata[fi]
         if len(f) != len(face_data):
-            log(f"face_to_vertices: mismatch at face {fi} — {len(f)} vs {len(face_data)}")
+            log(f"face_to_vertices: mismatch at face {fi} - {len(f)} vs {len(face_data)}")
             continue
         for vi, v in enumerate(f):
             vdata[v] = face_data[vi]
@@ -249,7 +332,7 @@ def face_to_vertices_dup(faces, fdata, verts):
             continue
         face_data = fdata[fi]
         if len(f) != len(face_data):
-            log(f"face_to_vertices_dup: mismatch at face {fi} — {len(f)} vs {len(face_data)}")
+            log(f"face_to_vertices_dup: mismatch at face {fi} - {len(f)} vs {len(face_data)}")
             continue
         for vi, v in enumerate(f):
             if vdata[v] is None or vdata[v] == face_data[vi]:
@@ -303,14 +386,32 @@ def create_bone_data(armature, arm_matrix, transform, flatten_hierarchy=False):
 # ============================================================================
 
 def _select_objects_by_type(*types):
-    """Deselect all, then select objects matching the given type(s)."""
-    bpy.context.view_layer.objects.active = None
-    bpy.ops.object.select_all(action='DESELECT')
+    """
+    Deselect all, then select objects matching the given type(s).
+
+    Only objects that are actually part of the current view layer are
+    considered — selecting objects from other scenes or from collections that
+    are not linked to the view layer makes ``bpy.context.selected_objects``
+    disagree with the visible scene, which broke the clip export whenever
+    more than one armature existed in the blend file.
+    """
+    view_layer = bpy.context.view_layer
+    try:
+        bpy.ops.object.mode_set(mode='OBJECT')
+    except RuntimeError:
+        pass
+
+    for obj in view_layer.objects:
+        obj.select_set(False)
+
+    view_layer.objects.active = None
+
     found = set()
-    for obj in bpy.data.objects:
+    for obj in view_layer.objects:
         if obj.type in types:
             obj.select_set(True)
             found.add(obj.type)
+
     for t in types:
         if t not in found:
             log(f"No {t.lower()} objects found in the scene.")
@@ -328,7 +429,7 @@ def _copy_textures(meshes_objs, export_dir):
     for obj in meshes_objs:
         for mat_slot in obj.material_slots:
             mat = mat_slot.material
-            if not mat or not mat.use_nodes:
+            if not mat or not material_uses_nodes(mat):
                 continue
             for node in mat.node_tree.nodes:
                 if node.type == 'TEX_IMAGE' and node.image and node.image.filepath:
@@ -396,7 +497,7 @@ def _resolve_material_textures(mat):
     The importer labels nodes consistently, but we also fall back to filename matching.
     """
     textures = {}
-    if not mat or not mat.use_nodes or not mat.node_tree:
+    if not mat or not material_uses_nodes(mat) or not mat.node_tree:
         return textures
 
     for node in mat.node_tree.nodes:
@@ -557,12 +658,26 @@ def export_k2_mesh(filename, opts=None):
     """
     Export scene meshes to a K2 .model file.
     opts: ExportOptions instance (or None for legacy call with apply_modifiers bool).
+
+    Supports Blender 4.x and 5.x APIs.
     """
     if opts is None or isinstance(opts, bool):
         apply_mod = opts if isinstance(opts, bool) else True
         opts = ExportOptions(apply_modifiers=apply_mod)
 
-    _select_objects_by_type('ARMATURE', 'MESH')
+    # Export the selected meshes/armature when the user made a selection,
+    # otherwise export everything in the scene.
+    view_layer = bpy.context.view_layer
+    preselected = [o for o in view_layer.objects
+                   if o.select_get() and o.type in ('MESH', 'ARMATURE')]
+
+    if preselected:
+        for obj in view_layer.objects:
+            obj.select_set(False)
+        for obj in preselected:
+            obj.select_set(True)
+    else:
+        _select_objects_by_type('ARMATURE', 'MESH')
 
     meshes = []
     mesh_objs = []
@@ -587,7 +702,7 @@ def export_k2_mesh(filename, opts=None):
                     me = obj.data
                 bm = bmesh.new()
                 bm.from_mesh(me)
-                bmesh.ops.triangulate(bm, faces=bm.faces[:])
+                bmesh.ops.triangulate(bm, faces=list(_get_bmesh_faces(bm)))
                 bm.transform(matrix)
                 sprites.append((obj, bm, mesh_type))
                 sprite_objs.append(obj)
@@ -600,7 +715,7 @@ def export_k2_mesh(filename, opts=None):
                     me = obj.data
                 bm = bmesh.new()
                 bm.from_mesh(me)
-                bmesh.ops.triangulate(bm, faces=bm.faces[:])
+                bmesh.ops.triangulate(bm, faces=list(_get_bmesh_faces(bm)))
                 bm.transform(matrix)
                 meshes.append((obj, bm, mesh_type))
                 mesh_objs.append(obj)
@@ -611,15 +726,22 @@ def export_k2_mesh(filename, opts=None):
     use_armature = armature and not opts.force_static
     bone_names = []
     bonedata = b''
+    # The armature must be in POSE position while the bone rest matrices are
+    # read. The previous value is restored afterwards - leaving the armature
+    # in REST makes the rig stop reacting to animation.
+    prev_pose_position = None
     if use_armature:
-        armature.pose_position = 'REST'
+        prev_pose_position = armature.pose_position
+        armature.pose_position = 'POSE'
         bone_names, bonedata = create_bone_data(
             armature, arm_matrix, opts.apply_modifiers,
             flatten_hierarchy=opts.remove_hierarchy,
         )
+        if prev_pose_position != 'POSE':
+            armature.pose_position = prev_pose_position
 
     if not meshes:
-        log("WARNING: No mesh objects found in scene — exported model will contain only bones")
+        log("WARNING: No mesh objects found in scene - exported model will contain only bones")
     else:
         log(f"Exporting {len(meshes)} mesh(es): {[obj.name for obj, _, _ in meshes]}")
 
@@ -670,25 +792,45 @@ def export_k2_mesh(filename, opts=None):
             flnk1 = []
             exclude_nrml = _should_exclude_normals(obj)
 
-            uv_lay = mesh.loops.layers.uv.active
-            has_uv = uv_lay is not None
-            col_lay = mesh.loops.layers.color.active
-            has_color = col_lay is not None
-            dvert_lay = mesh.verts.layers.deform.active
-            if dvert_lay and not opts.force_static:
-                flnk1 = [v[dvert_lay].items() for v in mesh.verts]
+            # The bmesh index tables must be up to date before we can rely on
+            # `loop.vert.index` / `vert.index`.
+            bmesh_ensure_lookup(mesh)
+            mesh.normal_update()
 
-            for f in mesh.faces:
+            # UV layers live on the bmesh loop layers. `mesh.loops.layers.uv`
+            # is available on BMesh (unlike on a plain Mesh data-block).
+            uv_layers = mesh.loops.layers.uv
+            uv_layer_list = list(uv_layers) if uv_layers is not None else []
+            uv_lay = uv_layers.active if uv_layers is not None else None
+            has_uv = uv_lay is not None
+
+            # Vertex colours: byte-colour layers are exposed through
+            # `loops.layers.color`, float-colour layers through
+            # `loops.layers.float_color`.
+            col_lay = bmesh_color_layer(mesh)
+            has_color = col_lay is not None
+
+            # Deform (skin) layer for skinning.
+            dvert_lay = bmesh_deform_layer(mesh)
+            if dvert_lay and not opts.force_static:
+                flnk1 = [
+                    read_deform_weights(mesh, v, dvert_lay)
+                    for v in mesh.verts
+                ]
+
+            mesh_faces = _get_bmesh_faces(mesh)
+            for f in mesh_faces:
                 uv = []
                 col = []
                 vindex = []
                 tang = []
                 for loop in f.loops:
-                    if has_uv:
-                        uv.append(loop[uv_lay].uv)
+                    if has_uv and uv_lay is not None:
+                        uv.append(tuple(loop[uv_lay].uv))
                     vindex.append(loop.vert.index)
-                    if has_color:
-                        col.append(loop[col_lay].color)
+                    if has_color and col_lay is not None:
+                        # Blender 5.x exposes the colour as a plain vector.
+                        col.append(tuple(loop[col_lay]))
                     tang.append(loop.calc_tangent())
                 if has_uv:
                     ftexc.append(uv)
@@ -774,41 +916,40 @@ def export_k2_mesh(filename, opts=None):
                     write_block(file, "sign", create_sign_data(meshindex, sign))
 
                     # Write additional UV channels if available (up to 8)
-                    uv_layers = mesh.loops.layers.uv
-                    if len(uv_layers) > 1:
-                        for channel_idx in range(1, min(len(uv_layers), 8)):
-                            uv_lay = uv_layers[channel_idx]
+                    if len(uv_layer_list) > 1:
+                        for channel_idx in range(1, min(len(uv_layer_list), 8)):
+                            uv_lay = uv_layer_list[channel_idx]
                             ftexc_ch = []
                             ftang_ch = []
 
-                            for f in mesh.faces:
+                            for f in mesh_faces:
                                 uv_ch = []
                                 tang_ch = []
                                 for loop in f.loops:
-                                    uv_ch.append(loop[uv_lay].uv)
+                                    uv_ch.append(tuple(loop[uv_lay].uv))
                                     tang_ch.append(loop.calc_tangent())
                                 ftexc_ch.append(uv_ch)
                                 ftang_ch.append(tang_ch)
 
-                            texc_ch = face_to_vertices(faces, ftexc_ch, vert)
-                            tang_ch_data = face_to_vertices(faces, ftang_ch, vert)
+                                texc_ch = face_to_vertices(faces, ftexc_ch, vert)
+                                tang_ch_data = face_to_vertices(faces, ftang_ch, vert)
 
-                            fsign_ch = calc_face_signs(ftexc_ch)
-                            sign_ch = face_to_vertices(faces, fsign_ch, vert)
+                                fsign_ch = calc_face_signs(ftexc_ch)
+                                sign_ch = face_to_vertices(faces, fsign_ch, vert)
 
-                            write_block(file, "texc", create_texc_data(texc_ch, meshindex, channel=channel_idx))
-                            for i in range(len(tang_ch_data)):
-                                if tang_ch_data[i] is not None:
-                                    tang_ch_data[i] = tang_ch_data[i] - vert[i].normal * tang_ch_data[i].dot(vert[i].normal)
-                                    tang_ch_data[i].normalize()
-                            write_block(file, "tang", create_tang_data(tang_ch_data, meshindex, channel=channel_idx))
+                                write_block(file, "texc", create_texc_data(texc_ch, meshindex, channel=channel_idx))
+                                for i in range(len(tang_ch_data)):
+                                    if tang_ch_data[i] is not None:
+                                        tang_ch_data[i] = tang_ch_data[i] - vert[i].normal * tang_ch_data[i].dot(vert[i].normal)
+                                        tang_ch_data[i].normalize()
+                                write_block(file, "tang", create_tang_data(tang_ch_data, meshindex, channel=channel_idx))
 
                 if not exclude_nrml:
                     write_block(file, "nrml", create_nrml_data(vert, meshindex))
             if colr is not None:
                 write_block(file, "colr", create_colr_data(colr, meshindex))
 
-            vlog(f'Mesh {meshindex} ({obj.name}): {len(vert) - len(mesh.verts)} verts duplicated')
+            vlog(f'Mesh {meshindex} ({obj.name}): {len(vert) - len(list(mesh.verts))} verts duplicated')
             meshindex += 1
 
     # Export sprites
@@ -816,7 +957,11 @@ def export_k2_mesh(filename, opts=None):
         log(f"Exporting {len(sprites)} sprite(s): {[obj.name for obj, _, _ in sprites]}")
         for obj, mesh, sprite_type in sprites:
             vert = list(mesh.verts)
-            faces = list(mesh.faces)
+            bmesh_ensure_lookup(mesh)
+            mesh_faces = _get_bmesh_faces(mesh)
+            # On a BMesh, `face.verts` yields BMVert objects - the vertex
+            # indices are needed for the binary face data.
+            faces = [[v.index for v in f.verts] for f in mesh_faces]
 
             # Get bounding box
             bbox = generate_bbox([mesh])
@@ -897,14 +1042,27 @@ def export_k2_clip(filename, opts=None, frame_start=None, frame_end=None):
     if frame_end is not None:
         opts.frame_end = frame_end
 
-    _select_objects_by_type('ARMATURE')
+    # Respect the user's selection: if exactly one armature is selected, use
+    # it. Otherwise fall back to the active object, and only as a last resort
+    # select every armature in the scene.
+    view_layer = bpy.context.view_layer
+    selected = [o for o in view_layer.objects
+                if o.select_get() and o.type == 'ARMATURE']
+    active = view_layer.objects.active
 
-    obj_list = bpy.context.selected_objects
-    if len(obj_list) != 1 or obj_list[0].type != 'ARMATURE':
-        err('Select needed armature only')
-        return
+    if len(selected) == 1:
+        arm_ob = selected[0]
+    elif active is not None and active.type == 'ARMATURE':
+        arm_ob = active
+    else:
+        _select_objects_by_type('ARMATURE')
+        selected = [o for o in view_layer.objects
+                    if o.select_get() and o.type == 'ARMATURE']
+        if len(selected) != 1:
+            err('Select the armature to export')
+            return
+        arm_ob = selected[0]
 
-    arm_ob = obj_list[0]
     armature = arm_ob.data
     motions = {}
 

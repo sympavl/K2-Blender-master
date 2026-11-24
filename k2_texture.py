@@ -1,11 +1,32 @@
 """
 K2 Blender Addon - Texture handling module.
 Handles texture scanning, matching, and material assignment.
+
+Tested with Blender 4.x and 5.x
 """
 
 import os
 import bpy
-from .k2_common import log, vlog
+try:
+    from .k2_common import log, vlog
+except ImportError:
+    from k2_common import log, vlog
+
+try:
+    from .k2_compat import (
+        ensure_material_node_tree,
+        BLENDER_VERSION, BLENDER_4_PLUS, BLENDER_5_PLUS,
+    )
+except ImportError:
+    from k2_compat import (
+        ensure_material_node_tree,
+        BLENDER_VERSION, BLENDER_4_PLUS, BLENDER_5_PLUS,
+    )
+
+# ============================================================================
+# Blender version detection
+# ============================================================================
+# BLENDER_VERSION / BLENDER_4_PLUS / BLENDER_5_PLUS come from k2_compat.
 
 
 # ============================================================================
@@ -147,8 +168,9 @@ def _setup_material_from_prefix(mat, type_map, tex_flags):
     if not any(tex_flags.values()):
         return False
 
-    mat.use_nodes = True
-    tree = mat.node_tree
+    tree = ensure_material_node_tree(mat)
+    if tree is None:
+        return False
     tree.nodes.clear()
 
     output = tree.nodes.new('ShaderNodeOutputMaterial')

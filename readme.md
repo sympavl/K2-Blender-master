@@ -1,7 +1,8 @@
 
-<h3 align="center">For Blender 5.0+</h3>
+<h3 align="center">For Blender 4.0+ (tested up to 5.3)</h3>
 
-Updated version to work properly with blender 5.3
+Updated version to work properly with blender 4.x and 5.x
+Verified with blender 5.3
 
 Install
 

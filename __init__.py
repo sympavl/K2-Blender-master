@@ -1,6 +1,7 @@
 """
 K2 Model/Animation Import-Export addon for Blender.
 Supports K2 engine formats used by Savage 2 and Heroes of Newerth.
+Tested with Blender 4.x and 5.x (up to 5.3)
 """
 
 import os
@@ -13,11 +14,22 @@ from bpy.props import (
 
 from . import k2_ui
 
+try:
+    from .k2_compat import (
+        set_bone_color, reset_bone_color,
+        BLENDER_VERSION, BLENDER_4_PLUS, BLENDER_5_PLUS,
+    )
+except ImportError:
+    from k2_compat import (
+        set_bone_color, reset_bone_color,
+        BLENDER_VERSION, BLENDER_4_PLUS, BLENDER_5_PLUS,
+    )
+
 bl_info = {
     "name": "K2 Model/Animation Import-Export",
     "author": "Anton Romanov",
-    "version": (0, 0, 5),
-    "blender": (5, 0, 0),
+    "version": (0, 2, 0),
+    "blender": (4, 0, 0),
     "location": "File > Import-Export > K2 model/clip",
     "description": "Import-Export meshes and animations used by K2 engine (Savage 2 and Heroes of Newerth games)",
     "warning": "",
@@ -202,7 +214,9 @@ class K2ImporterClip(bpy.types.Operator):
 
     def execute(self, context):
         from . import k2_import
-        k2_import.readclip(self.filepath)
+        if not k2_import.readclip(self.filepath):
+            self.report({'ERROR'}, "Failed to import clip - see the console for details")
+            return {'CANCELLED'}
         return {'FINISHED'}
 
     def invoke(self, context, event):
@@ -388,11 +402,11 @@ class K2_OT_FixBoneDisplay(bpy.types.Operator):
         for obj in arms:
             arm = obj.data
             arm.display_type = 'STICK'
+            arm.show_bone_colors = True
             for bone in arm.bones:
-                bone.color.palette = 'CUSTOM'
-                bone.color.custom.normal = (0.0, 0.75, 1.0)
-                bone.color.custom.select = (1.0, 0.85, 0.0)
-                bone.color.custom.active = (0.2, 1.0, 0.4)
+                # Blender 4.0+ stores bone colours on the bone itself
+                # (bone.color.palette / bone.color.custom.*).
+                set_bone_color(bone)
                 count += 1
         self.report({'INFO'}, f"Fixed {count} bones across {len(arms)} armature(s)")
         return {'FINISHED'}
@@ -412,7 +426,7 @@ class K2_OT_ResetBoneDisplay(bpy.types.Operator):
             arm = obj.data
             arm.display_type = 'OCTAHEDRAL'
             for bone in arm.bones:
-                bone.color.palette = 'DEFAULT'
+                reset_bone_color(bone)
         self.report({'INFO'}, "Bone display reset to defaults")
         return {'FINISHED'}
 
@@ -500,6 +514,7 @@ def register():
     pcoll = bpy.utils.previews.new()
     icon_path = os.path.join(os.path.dirname(__file__), "logo.png")
     if os.path.exists(icon_path):
+        # Always pass 'IMAGE' as file_type - required in Blender 4.x and 5.x
         pcoll.load("logo", icon_path, 'IMAGE')
     preview_collections["k2_icons"] = pcoll
 

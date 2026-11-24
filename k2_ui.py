@@ -1,9 +1,16 @@
 """
 K2 Blender Addon - UI Panel definitions.
 Separated from core logic for easier maintenance and modification.
+
+Tested with Blender 4.x and 5.x
 """
 
 import bpy
+
+try:
+    from .k2_compat import BLENDER_VERSION, BLENDER_4_PLUS, BLENDER_5_PLUS
+except ImportError:
+    from k2_compat import BLENDER_VERSION, BLENDER_4_PLUS, BLENDER_5_PLUS
 
 
 # ============================================================================
@@ -148,7 +155,9 @@ class K2_PT_ArmaturePanel(bpy.types.Panel):
 
         box.separator()
         box.prop(arm, "show_axes", text="Show Bone Axes")
-        box.prop(arm, "relation_line_position", text="Relation Lines")
+        # relation_line_position was removed in Blender 4.x
+        if not BLENDER_4_PLUS and hasattr(arm, 'relation_line_position'):
+            box.prop(arm, "relation_line_position", text="Relation Lines")
 
 
 class K2_PT_MeshInfoPanel(bpy.types.Panel):
@@ -209,7 +218,10 @@ def get_armature_objects():
 
 def get_logo_icon():
     """Get custom logo icon ID for UI display."""
-    from . import preview_collections
+    try:
+        from . import preview_collections
+    except ImportError:
+        import preview_collections
     pcoll = preview_collections.get("k2_icons")
     if pcoll and "logo" in pcoll:
         return pcoll["logo"].icon_id
