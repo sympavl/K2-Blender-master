@@ -27,7 +27,7 @@ except ImportError:
 
 bl_info = {
     "name": "K2 Model/Animation Import-Export",
-    "author": "Anton Romanov",
+    "author": "Anton Romanov, updated by sympavl",
     "version": (0, 2, 0),
     "blender": (4, 0, 0),
     "location": "File > Import-Export > K2 model/clip",
