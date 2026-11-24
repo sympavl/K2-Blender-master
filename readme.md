@@ -1,8 +1,7 @@
 
 <h3 align="center">For Blender 5.0+</h3>
 
-Updated version to work properly with blender 5.0
-Verified with blender 5.3
+Updated version to work properly with blender 5.3
 
 Install
 
